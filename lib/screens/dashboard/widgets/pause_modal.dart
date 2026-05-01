@@ -1,7 +1,7 @@
 // from: design/design_handoff_arc_app/design/screens/screens-live.jsx
 //        (ScreenPause)
 
-import 'package:flutter/widgets.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../models/live_metrics.dart';
@@ -78,71 +78,77 @@ class PauseModalContent extends ConsumerWidget {
     final double km = ref.watch(distanceProvider);
     final String pace = ref.watch(paceProvider);
 
-    return Stack(
-      children: <Widget>[
-        // Backdrop. Opaque tap absorber — we deliberately do NOT pop the
-        // route on backdrop tap; the user must commit to REANUDAR or
-        // TERMINAR.
-        Positioned.fill(
-          child: GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: () {},
-            child: Container(
-              color: AppColors.bg.withValues(alpha: _backdropOpacity),
-            ),
-          ),
-        ),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(
-            _hPadding,
-            _topPadding,
-            _hPadding,
-            _bottomPadding,
-          ),
-          child: Center(
-            child: Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(_cardPadding),
-              decoration: BoxDecoration(
-                color: AppColors.surface,
-                border: Border.all(color: AppColors.border),
-                borderRadius: BorderRadius.circular(R.xl),
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: <Widget>[
-                  const Caption('● Sesión pausada', color: AppColors.warn),
-                  const SizedBox(height: _captionToTimer),
-                  const SessionTimer(style: AppText.display3),
-                  const SizedBox(height: _timerToSubtext),
-                  Text(
-                    '${km.toStringAsFixed(1)} km · Ritmo medio $pace/km',
-                    style: AppText.bodySm.copyWith(color: AppColors.text2),
-                  ),
-                  const SizedBox(height: _subtextToSnapshot),
-                  _Snapshot(metrics: m),
-                  const SizedBox(height: _snapshotToActions),
-                  ARCButton(
-                    label: 'REANUDAR',
-                    full: true,
-                    icon: ArcIcons.play(size: 18, color: AppColors.bg),
-                    onTap: () =>
-                        Navigator.of(context).pop(pauseResultResume),
-                  ),
-                  const SizedBox(height: _actionsGap),
-                  ARCButton(
-                    label: 'TERMINAR SESIÓN',
-                    kind: ARCButtonKind.destructive,
-                    full: true,
-                    onTap: () =>
-                        Navigator.of(context).pop(pauseResultStop),
-                  ),
-                ],
+    // Scaffold with transparent background gives the route the implicit
+    // Material ancestor that Text widgets need to render without the
+    // yellow "missing Material" debug underlines.
+    return Scaffold(
+      backgroundColor: Colors.transparent,
+      body: Stack(
+        children: <Widget>[
+          // Backdrop. Opaque tap absorber — we deliberately do NOT pop the
+          // route on backdrop tap; the user must commit to REANUDAR or
+          // TERMINAR.
+          Positioned.fill(
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () {},
+              child: Container(
+                color: AppColors.bg.withValues(alpha: _backdropOpacity),
               ),
             ),
           ),
-        ),
-      ],
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+              _hPadding,
+              _topPadding,
+              _hPadding,
+              _bottomPadding,
+            ),
+            child: Center(
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(_cardPadding),
+                decoration: BoxDecoration(
+                  color: AppColors.surface,
+                  border: Border.all(color: AppColors.border),
+                  borderRadius: BorderRadius.circular(R.xl),
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    const Caption('● Sesión pausada', color: AppColors.warn),
+                    const SizedBox(height: _captionToTimer),
+                    const SessionTimer(style: AppText.display3),
+                    const SizedBox(height: _timerToSubtext),
+                    Text(
+                      '${km.toStringAsFixed(1)} km · Ritmo medio $pace/km',
+                      style: AppText.bodySm.copyWith(color: AppColors.text2),
+                    ),
+                    const SizedBox(height: _subtextToSnapshot),
+                    _Snapshot(metrics: m),
+                    const SizedBox(height: _snapshotToActions),
+                    ARCButton(
+                      label: 'REANUDAR',
+                      full: true,
+                      icon: ArcIcons.play(size: 18, color: AppColors.bg),
+                      onTap: () =>
+                          Navigator.of(context).pop(pauseResultResume),
+                    ),
+                    const SizedBox(height: _actionsGap),
+                    ARCButton(
+                      label: 'TERMINAR SESIÓN',
+                      kind: ARCButtonKind.destructive,
+                      full: true,
+                      onTap: () =>
+                          Navigator.of(context).pop(pauseResultStop),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

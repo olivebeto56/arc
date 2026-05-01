@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/history_period.dart';
 import '../models/session_summary.dart';
 import '../providers/history_provider.dart';
+import '../providers/session_providers.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_text.dart';
@@ -16,9 +17,28 @@ import '../widgets/empty_state.dart';
 import '../widgets/segmented.dart';
 import 'history/widgets/aggregate_stats_strip.dart';
 import 'history/widgets/session_row.dart';
+import 'summary_screen.dart';
 
 class HistoryScreen extends ConsumerWidget {
   const HistoryScreen({super.key});
+
+  /// Opens [SummaryScreen] in read-only "historical" mode, with the global
+  /// `sessionSummaryProvider` overridden so the screen renders the tapped
+  /// entry instead of the live post-session mock.
+  void _openSummary(BuildContext context, SessionSummaryData entry) {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => ProviderScope(
+          overrides: <Override>[
+            sessionSummaryProvider.overrideWith(
+              (Ref ref) => entry,
+            ),
+          ],
+          child: const SummaryScreen(isHistorical: true),
+        ),
+      ),
+    );
+  }
 
   // JSX literal — between-scale.
   static const double _statusBarReserve = 56;
@@ -107,12 +127,10 @@ class HistoryScreen extends ConsumerWidget {
                       separatorBuilder: (_, __) =>
                           const SizedBox(height: _rowGap),
                       itemBuilder: (BuildContext context, int i) {
+                        final SessionSummaryData entry = entries[i];
                         return SessionRow(
-                          summary: entries[i],
-                          // TODO(arc): navigate to a Summary that shows
-                          // entries[i] when SummaryScreen accepts an
-                          // override summary param.
-                          onTap: () {},
+                          summary: entry,
+                          onTap: () => _openSummary(context, entry),
                         );
                       },
                     ),

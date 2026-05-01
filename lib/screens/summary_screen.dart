@@ -23,7 +23,14 @@ import 'summary/widgets/summary_header.dart';
 import 'summary/widgets/symmetry_bar.dart';
 
 class SummaryScreen extends ConsumerWidget {
-  const SummaryScreen({super.key});
+  const SummaryScreen({
+    super.key,
+    this.isHistorical = false,
+  });
+
+  /// `true` when opened from History (read-only view of a saved session).
+  /// In that mode, back / LISTO simply pop instead of saving + going Home.
+  final bool isHistorical;
 
   // JSX literal — between-scale.
   static const double _statusBarReserve = 56;
@@ -43,7 +50,23 @@ class SummaryScreen extends ConsumerWidget {
     // TODO(arc): wire to share_plus once a Summary share-sheet asset exists.
   }
 
+  void _onBack(BuildContext context, WidgetRef ref) {
+    if (isHistorical) {
+      Navigator.of(context).maybePop();
+      return;
+    }
+    _persistAndGoHome(context, ref);
+  }
+
   void _onDone(BuildContext context, WidgetRef ref) {
+    if (isHistorical) {
+      Navigator.of(context).maybePop();
+      return;
+    }
+    _persistAndGoHome(context, ref);
+  }
+
+  void _persistAndGoHome(BuildContext context, WidgetRef ref) {
     final SessionSummaryData summary = ref.read(sessionSummaryProvider);
     ref.read(sessionHistoryProvider.notifier).save(summary);
     Navigator.of(context).pushAndRemoveUntil(
@@ -67,9 +90,7 @@ class SummaryScreen extends ConsumerWidget {
             ARCTopBar(
               left: GestureDetector(
                 behavior: HitTestBehavior.opaque,
-                // TODO(arc): replace with proper back navigation once the
-                // post-session route stack supports it.
-                onTap: () => _onDone(context, ref),
+                onTap: () => _onBack(context, ref),
                 child: ArcIcons.chevL(size: 22),
               ),
               right: GestureDetector(
