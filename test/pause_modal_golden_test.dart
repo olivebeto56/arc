@@ -37,23 +37,6 @@ const BandState _connectedRight = BandState(
   battery: 89,
 );
 
-class _StaticBandNotifier extends BandNotifier {
-  _StaticBandNotifier(BandState initial)
-      : super(
-          initial,
-          const BandMockProgression(
-            startDelay: Duration.zero,
-            searchRssi: -65,
-            foundRssi: -60,
-            connectedRssi: -58,
-            battery: 87,
-          ),
-        );
-
-  @override
-  void start() {}
-}
-
 class _StaticTimerNotifier extends SessionTimerNotifier {
   _StaticTimerNotifier() {
     state = const Duration(minutes: 28, seconds: 43);
@@ -88,10 +71,8 @@ class _StaticMetricsNotifier extends LiveMetricsNotifier {
 ProviderScope _scope({required Widget child}) {
   return ProviderScope(
     overrides: <Override>[
-      leftBandProvider
-          .overrideWith((Ref ref) => _StaticBandNotifier(_connectedLeft)),
-      rightBandProvider
-          .overrideWith((Ref ref) => _StaticBandNotifier(_connectedRight)),
+      leftBandProvider.overrideWithValue(_connectedLeft),
+      rightBandProvider.overrideWithValue(_connectedRight),
       sessionTimerProvider.overrideWith((Ref ref) => _StaticTimerNotifier()),
       liveMetricsProvider.overrideWith((Ref ref) => _StaticMetricsNotifier()),
       sessionStatusProvider.overrideWith((Ref ref) => SessionStatus.paused),

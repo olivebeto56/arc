@@ -16,12 +16,20 @@ import 'scan_screen.dart';
 
 /// Step 1 of onboarding — request Bluetooth + Location permissions.
 ///
-/// Mock-only: tapping a card rotates `pending → granted → denied → pending`
-/// to preview the three states. Real `permission_handler` integration lands
-/// in Phase 4 per the handoff.
-class PermisosScreen extends ConsumerWidget {
+/// Tapping a card escalates through the OS flow handled by
+/// `_PermissionNotifier`: first tap shows the system prompt; subsequent
+/// taps (after a permanent denial) jump to the app's Settings page so the
+/// user can flip the toggle. We also re-check both permissions when the
+/// app resumes, so coming back from Settings refreshes the badges.
+class PermisosScreen extends ConsumerStatefulWidget {
   const PermisosScreen({super.key});
 
+  @override
+  ConsumerState<PermisosScreen> createState() => _PermisosScreenState();
+}
+
+class _PermisosScreenState extends ConsumerState<PermisosScreen>
+    with WidgetsBindingObserver {
   // Status bar reservation per handoff (we draw our own bar — not native).
   static const double _statusBarReserve = 56;
 
@@ -31,19 +39,41 @@ class PermisosScreen extends ConsumerWidget {
   // JSX literal — H1 marginBottom 10, between S.s2 and S.s3.
   static const double _titleToBody = 10;
 
-  static PermissionStatus _next(PermissionStatus s) {
-    switch (s) {
-      case PermissionStatus.pending:
-        return PermissionStatus.granted;
-      case PermissionStatus.granted:
-        return PermissionStatus.denied;
-      case PermissionStatus.denied:
-        return PermissionStatus.pending;
-    }
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
   }
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      // Catch grants/denials the user made in Settings.
+      // ignore: unawaited_futures
+      ref.read(bluetoothPermissionProvider.notifier).refresh();
+      // ignore: unawaited_futures
+      ref.read(locationPermissionProvider.notifier).refresh();
+    }
+  }
+
+  void _requestBluetooth() {
+    // ignore: unawaited_futures
+    ref.read(bluetoothPermissionProvider.notifier).request();
+  }
+
+  void _requestLocation() {
+    // ignore: unawaited_futures
+    ref.read(locationPermissionProvider.notifier).request();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final PermissionStatus btStatus = ref.watch(bluetoothPermissionProvider);
     final PermissionStatus locStatus = ref.watch(locationPermissionProvider);
     final bool canContinue = ref.watch(allPermissionsGrantedProvider);
@@ -85,10 +115,10 @@ class PermisosScreen extends ConsumerWidget {
                         'Para conectar las bandas SportBand-L y SportBand-R '
                         'en tus tobillos.',
                     status: btStatus,
-                    // TODO(arc): replace with permission_handler in Phase 4.
-                    onTap: () => ref
-                        .read(bluetoothPermissionProvider.notifier)
-                        .update(_next),
+                    // Always tappable — request() handles every state
+                    // (granted = no-op, denied = re-prompt, permanently
+                    // denied = openAppSettings).
+                    onTap: _requestBluetooth,
                   ),
                   const SizedBox(height: _cardListGap),
                   PermissionCard(
@@ -98,10 +128,7 @@ class PermisosScreen extends ConsumerWidget {
                         'Para registrar tu ruta y calcular distancia y ritmo '
                         'reales con GPS.',
                     status: locStatus,
-                    // TODO(arc): replace with permission_handler in Phase 4.
-                    onTap: () => ref
-                        .read(locationPermissionProvider.notifier)
-                        .update(_next),
+                    onTap: _requestLocation,
                   ),
                   const SizedBox(height: S.s5),
                   GestureDetector(

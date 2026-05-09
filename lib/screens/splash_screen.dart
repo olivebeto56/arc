@@ -5,12 +5,14 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../providers/permissions_provider.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_text.dart';
 import '../widgets/arc_logo.dart';
 import '../widgets/loading_bar.dart';
 import 'permisos_screen.dart';
+import 'scan_screen.dart';
 
 /// Splash screen shown for ~1500 ms while BLE / GPS subsystems initialize.
 ///
@@ -42,11 +44,16 @@ class _SplashScreenState extends State<SplashScreen> {
     super.dispose();
   }
 
-  void _goNext() {
+  Future<void> _goNext() async {
+    if (!mounted) return;
+    // Skip the Permisos step when the OS already remembers a grant from
+    // a previous session. New users still see it.
+    final bool alreadyGranted = await arePermissionsAlreadyGranted();
     if (!mounted) return;
     Navigator.of(context).pushReplacement(
       MaterialPageRoute<void>(
-        builder: (_) => const PermisosScreen(),
+        builder: (_) =>
+            alreadyGranted ? const ScanScreen() : const PermisosScreen(),
       ),
     );
   }

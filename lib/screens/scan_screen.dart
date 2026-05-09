@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../providers/band_providers.dart';
 import '../providers/settings_provider.dart';
+import '../services/ble_manager.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_text.dart';
@@ -33,8 +34,8 @@ class ScanScreen extends ConsumerWidget {
   static const double _footerGap = 10;
 
   void _restart(WidgetRef ref) {
-    ref.read(leftBandProvider.notifier).start();
-    ref.read(rightBandProvider.notifier).start();
+    // ignore: unawaited_futures
+    ref.read(bleManagerProvider.notifier).restartScan();
   }
 
   void _goHome(BuildContext context) {

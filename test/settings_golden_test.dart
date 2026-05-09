@@ -30,23 +30,6 @@ const BandState _connectedRight = BandState(
   battery: 92,
 );
 
-class _StaticBandNotifier extends BandNotifier {
-  _StaticBandNotifier(BandState initial)
-      : super(
-          initial,
-          const BandMockProgression(
-            startDelay: Duration.zero,
-            searchRssi: -65,
-            foundRssi: -60,
-            connectedRssi: -58,
-            battery: 87,
-          ),
-        );
-
-  @override
-  void start() {}
-}
-
 Future<void> _loadFonts() async {
   Future<void> loadOne(String family, List<String> assets) async {
     final FontLoader loader = FontLoader(family);
@@ -73,10 +56,8 @@ Future<void> _loadFonts() async {
 ProviderScope _scope({required Widget child}) {
   return ProviderScope(
     overrides: <Override>[
-      leftBandProvider
-          .overrideWith((Ref ref) => _StaticBandNotifier(_connectedLeft)),
-      rightBandProvider
-          .overrideWith((Ref ref) => _StaticBandNotifier(_connectedRight)),
+      leftBandProvider.overrideWithValue(_connectedLeft),
+      rightBandProvider.overrideWithValue(_connectedRight),
     ],
     child: child,
   );

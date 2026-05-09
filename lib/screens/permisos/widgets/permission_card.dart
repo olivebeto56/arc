@@ -45,7 +45,7 @@ class PermissionCard extends StatelessWidget {
   static String _label(PermissionStatus s) {
     switch (s) {
       case PermissionStatus.granted:
-        return 'Concedido';
+        return 'Listo';
       case PermissionStatus.pending:
         return 'Pendiente';
       case PermissionStatus.denied:
