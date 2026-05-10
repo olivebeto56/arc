@@ -16,8 +16,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 const BandState _connectedLeft = BandState(
+  chipId: 'A4C1',
   nodeId: 'LEFT_ANKLE',
-  name: 'SportBand-L',
+  name: 'SportBand-A4C1',
   status: BandStatus.connected,
   mac: 'A4:C1:38:7B:21',
   rssi: -58,
@@ -25,8 +26,9 @@ const BandState _connectedLeft = BandState(
 );
 
 const BandState _connectedRight = BandState(
+  chipId: 'A47B',
   nodeId: 'RIGHT_ANKLE',
-  name: 'SportBand-R',
+  name: 'SportBand-A47B',
   status: BandStatus.connected,
   mac: 'A4:C1:38:7B:9F',
   rssi: -65,

@@ -55,6 +55,7 @@ class BandCard extends StatelessWidget {
         return AppColors.ok;
       case BandStatus.searching:
       case BandStatus.found:
+      case BandStatus.connecting:
         return AppColors.accent;
       case BandStatus.error:
         return AppColors.crit;
@@ -67,6 +68,8 @@ class BandCard extends StatelessWidget {
         return 'Buscando…';
       case BandStatus.found:
         return 'Detectada';
+      case BandStatus.connecting:
+        return 'Conectando…';
       case BandStatus.connected:
         return 'Conectado';
       case BandStatus.error:
@@ -180,6 +183,7 @@ class _StatusIndicator extends StatelessWidget {
   Widget build(BuildContext context) {
     switch (status) {
       case BandStatus.searching:
+      case BandStatus.connecting:
         return const _ScanSpinner();
       case BandStatus.found:
         return const Dot(color: AppColors.accent, size: 8, glow: true);

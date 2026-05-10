@@ -1,12 +1,14 @@
 import 'dart:async';
 import 'dart:io' show Platform;
 
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart' as ph;
 
 import '../models/band_state.dart';
 import '../models/sensor_data.dart';
+import 'band_assignment_storage.dart';
 import 'sensor_parser.dart';
 
 // BLE GATT identifiers — must match firmware/config.h byte for byte.
@@ -18,56 +20,78 @@ const String _kBatteryUuid = '19b10002-e8f2-537e-4f6c-d104768a1214';
 const String _kConfigUuid = '19b10003-e8f2-537e-4f6c-d104768a1214';
 
 /// SportBand-XXXX advertising prefix. The firmware appends 4 hex chars
-/// derived from the nRF52840 factory DEVICEID, so each physical band has a
-/// stable name across resets and OS-level MAC rotation.
+/// derived from the nRF52840 factory DEVICEID, so each physical band has
+/// a stable name across resets and OS-level MAC rotation.
 const String _kAdvNamePrefix = 'SportBand-';
 
-/// App-side identifiers — the firmware does not know its own side.
-const String kLeftAnkle = 'LEFT_ANKLE';
-const String kRightAnkle = 'RIGHT_ANKLE';
-
-/// Aggregate state surfaced by `bleManagerProvider`. Per-side `BandState`
-/// objects are derived in `band_providers.dart`.
+/// State surfaced by `bleManagerProvider`. Bands are keyed by `chipId`
+/// (the 4-hex identity) so the manager can hold connections without
+/// requiring a side assignment yet — the shake-to-identify flow runs
+/// AFTER both bands are connected, and persists the resolved
+/// `chipId → side` map in `BandAssignmentStorage`.
 class BleManagerState {
   const BleManagerState({
-    required this.left,
-    required this.right,
+    required this.bands,
+    required this.assignments,
     required this.scanning,
     this.error,
   });
 
-  final BandState left;
-  final BandState right;
-  final bool scanning;
+  /// Every SportBand-XXXX seen during this session, keyed by chipId.
+  final Map<String, BandState> bands;
 
-  /// Last unrecoverable scan/connect error message — surfaced verbatim in
-  /// the scan screen footer in Phase 4 (Sprint 2 just logs).
+  /// Persisted side assignments. Null when storage hasn't been loaded yet.
+  /// Empty map = first-time pairing (none assigned yet).
+  final Map<String, String> assignments;
+
+  final bool scanning;
   final String? error;
 
   static const BleManagerState initial = BleManagerState(
-    left: BandState(
-      nodeId: kLeftAnkle,
-      name: 'SportBand-…',
-      status: BandStatus.searching,
-    ),
-    right: BandState(
-      nodeId: kRightAnkle,
-      name: 'SportBand-…',
-      status: BandStatus.searching,
-    ),
+    bands: <String, BandState>{},
+    assignments: <String, String>{},
     scanning: false,
   );
 
+  /// Find the BandState assigned to a specific side, or null when no
+  /// band is yet bound to that ankle. Used by `leftBandProvider` /
+  /// `rightBandProvider` to derive their per-side BandState.
+  BandState? bandForSide(String side) {
+    for (final MapEntry<String, String> e in assignments.entries) {
+      if (e.value == side) return bands[e.key];
+    }
+    return null;
+  }
+
+  /// chipIds connected but without a side assignment yet — these are the
+  /// targets of the shake-to-identify flow. Empty when nothing's pending.
+  List<String> get pendingChipIds {
+    return bands.entries
+        .where((MapEntry<String, BandState> e) =>
+            e.value.status == BandStatus.connected &&
+            !assignments.containsKey(e.key))
+        .map((MapEntry<String, BandState> e) => e.key)
+        .toList();
+  }
+
+  /// True when both ankles have a band actively connected.
+  bool get bothSidesConnected {
+    final BandState? l = bandForSide(kLeftAnkle);
+    final BandState? r = bandForSide(kRightAnkle);
+    return l?.status == BandStatus.connected &&
+        r?.status == BandStatus.connected;
+  }
+
   BleManagerState copyWith({
-    BandState? left,
-    BandState? right,
+    Map<String, BandState>? bands,
+    Map<String, String>? assignments,
     bool? scanning,
     String? error,
     bool clearError = false,
   }) {
     return BleManagerState(
-      left: left ?? this.left,
-      right: right ?? this.right,
+      bands: bands ?? this.bands,
+      assignments: assignments ?? this.assignments,
       scanning: scanning ?? this.scanning,
       error: clearError ? null : (error ?? this.error),
     );
@@ -77,55 +101,72 @@ class BleManagerState {
 /// Drives the BLE lifecycle for both ankle bands.
 ///
 /// Lifecycle:
-/// 1. On first read of `bleManagerProvider`, the constructor kicks off
-///    `_init` which requests permissions, waits for the adapter, and starts
-///    a service-UUID-filtered scan.
-/// 2. As `SportBand-XXXX` advertisers arrive, the strongest two not yet
-///    paired are assigned to the LEFT and RIGHT slots respectively. This is
-///    a v1 heuristic — proper "shake the left band" pairing with `chip_id →
-///    side` persistence lands later. (See CLAUDE.md §5.)
-/// 3. Both bands are connected in parallel (`_connect` is fire-and-forget,
-///    not sequential), services discovered, and notifications subscribed on
-///    the sensor + battery characteristics.
-/// 4. On disconnect, status flips to `error`/`searching` and a 2 s backoff
-///    reconnect is scheduled. Sensor data is funnelled to a broadcast
-///    `Stream<SensorData>` for downstream metrics consumers.
+/// 1. On first read of `bleManagerProvider`, `_init` loads any persisted
+///    `chipId → side` assignments, requests permissions, waits for the
+///    BLE adapter, and starts a service-UUID-filtered scan.
+/// 2. Every advertising `SportBand-XXXX` is connected immediately. The
+///    side assignment is resolved from the storage map (if known) or
+///    left blank (pending identification).
+/// 3. When 2 bands are connected without sides, the UI navigates to
+///    `IdentifyScreen` which calls `assignSide()` after the user shakes
+///    the left band — that persists the chip→side mapping for future
+///    sessions.
+/// 4. Reconnect on disconnect with 2 s back-off; re-discovers services
+///    and re-subscribes to sensor + battery notifications.
 class BleManager extends StateNotifier<BleManagerState> {
-  BleManager() : super(BleManagerState.initial) {
+  BleManager(this._storage) : super(BleManagerState.initial) {
     _init();
   }
+
+  final BandAssignmentStorage _storage;
 
   StreamSubscription<List<ScanResult>>? _scanSub;
   StreamSubscription<BluetoothAdapterState>? _adapterSub;
   StreamSubscription<bool>? _isScanningSub;
 
-  /// One `_BandConnection` per assigned side, holding device + subscriptions.
+  /// One `_BandConnection` per band the user has tapped, keyed by chipId.
   final Map<String, _BandConnection> _conns = <String, _BandConnection>{};
 
-  /// Track BLE remoteIds we've already assigned to avoid double-pairing the
-  /// same physical band into both slots when a duplicate scan result fires.
-  final Map<String, String> _assigned = <String, String>{};
+  /// Every `BluetoothDevice` seen during the current scan, keyed by
+  /// chipId. Populated as scan results arrive — we don't connect until
+  /// the user taps a row in `ScanScreen` and `connectBand` is called.
+  final Map<String, BluetoothDevice> _devices =
+      <String, BluetoothDevice>{};
+
+  /// Guard against the double-restart that fires when both the
+  /// adapter listener and `_init` call `restartScan` on boot.
+  bool _restartInProgress = false;
 
   bool _disposed = false;
 
   /// Broadcast stream of decoded sensor packets — both bands feed it.
-  /// Subscribers (metrics engine, recording layer) attach via
-  /// `bleManager.sensorDataStream`.
+  /// Subscribers (shake detector during pairing, metrics engine in
+  /// Sprint 3) attach via `bleManager.sensorDataStream`.
   final StreamController<SensorData> _sensorCtrl =
       StreamController<SensorData>.broadcast();
 
   Stream<SensorData> get sensorDataStream => _sensorCtrl.stream;
 
+  /// Public accessor used by `_BandConnection` to look up the side label
+  /// when parsing incoming sensor packets — `state.assignments` itself is
+  /// `@protected` (intended for internal `state =` mutations only).
+  Map<String, String> get assignments => state.assignments;
+
   Future<void> _init() async {
+    // Pull persisted side assignments first so scan results immediately
+    // resolve to the right side when the user reopens the app.
+    final Map<String, String> saved = await _storage.load();
+    if (_disposed) return;
+    state = state.copyWith(assignments: saved);
+
     _adapterSub = FlutterBluePlus.adapterState.listen((BluetoothAdapterState s) {
       if (_disposed) return;
       if (s == BluetoothAdapterState.on) {
-        // Auto-resume scanning when the user toggles BT back on.
         if (!state.scanning && _conns.length < 2) {
           restartScan();
         }
       } else {
-        _markBothError('Bluetooth apagado');
+        state = state.copyWith(error: 'Bluetooth apagado');
       }
     });
 
@@ -144,82 +185,126 @@ class BleManager extends StateNotifier<BleManagerState> {
       final Map<ph.Permission, ph.PermissionStatus> res = await <ph.Permission>[
         ph.Permission.bluetoothScan,
         ph.Permission.bluetoothConnect,
-        // locationWhenInUse is only required on Android < 12, but requesting
-        // it on 12+ is a no-op and keeps the call site simple.
-        ph.Permission.locationWhenInUse,
       ].request();
-      // bluetoothScan + bluetoothConnect must be granted; location is needed
-      // only on legacy Android — accept any non-permanent state for it.
       final bool scanOk = res[ph.Permission.bluetoothScan]?.isGranted ?? false;
       final bool connOk = res[ph.Permission.bluetoothConnect]?.isGranted ?? false;
       return scanOk && connOk;
     }
-    if (Platform.isIOS) {
-      final ph.PermissionStatus s = await ph.Permission.bluetooth.request();
-      // iOS: `bluetooth` resolves to "granted" after the first system
-      // prompt; fall back to allowing if `permanentlyDenied` is not set, as
-      // some iOS versions report `denied` even when usable.
-      return !s.isPermanentlyDenied;
-    }
+    // iOS: do not call `permission_handler.Permission.bluetooth.request()`
+    // here — its iOS implementation is unreliable (returns
+    // permanentlyDenied even when the user accepts the prompt). We rely
+    // on `FlutterBluePlus.adapterState` instead, which `restartScan`
+    // checks immediately after this. If iOS hasn't granted bluetooth,
+    // the adapter will be `unauthorized`, not `on`, and we'll surface a
+    // friendly error there.
     return true;
   }
 
-  /// Restart the scan, dropping any existing connections. Wired to the
-  /// "REESCANEAR" button in `scan_screen.dart`.
+  /// Full teardown + re-scan: drops every connection, clears the
+  /// discovered list and starts a brand-new scan. Used internally by
+  /// `_init` and the adapter on-events; **not** wired to REESCANEAR
+  /// (that calls `rescan` so connected bands survive).
+  ///
+  /// Idempotent: callers like `_init` and the adapter listener may both
+  /// fire on boot, so we no-op if a scan setup is already running.
   Future<void> restartScan() async {
     if (_disposed) return;
+    if (_restartInProgress) {
+      debugPrint('[ble] restartScan ignored — already in progress');
+      return;
+    }
+    _restartInProgress = true;
+    try {
+      debugPrint('[ble] restartScan');
 
-    await _stopScanInternal();
+      await _stopScanInternal();
 
-    // Tear down any previous connections so we re-pair fresh.
-    final List<Future<void>> teardown = <Future<void>>[
-      for (final _BandConnection c in _conns.values) c.disconnect(),
-    ];
-    await Future.wait<void>(teardown);
-    _conns.clear();
-    _assigned.clear();
+      final List<Future<void>> teardown = <Future<void>>[
+        for (final _BandConnection c in _conns.values) c.disconnect(),
+      ];
+      await Future.wait<void>(teardown);
+      _conns.clear();
+      _devices.clear();
 
-    state = state.copyWith(
-      left: state.left.copyWith(
-        status: BandStatus.searching,
-        clearBattery: true,
-      ),
-      right: state.right.copyWith(
-        status: BandStatus.searching,
-        clearBattery: true,
-      ),
-      clearError: true,
-    );
+      state = state.copyWith(
+        bands: <String, BandState>{},
+        clearError: true,
+      );
 
+      await _startScanStream();
+    } finally {
+      _restartInProgress = false;
+    }
+  }
+
+  /// Re-run discovery WITHOUT disturbing active connections. Wired to
+  /// the "REESCANEAR" button in `scan_screen.dart` — the user wants to
+  /// hunt for more bands while keeping whatever they've already
+  /// connected (and the persisted side assignments).
+  Future<void> rescan() async {
+    if (_disposed) return;
+    if (_restartInProgress) {
+      debugPrint('[ble] rescan ignored — already in progress');
+      return;
+    }
+    _restartInProgress = true;
+    try {
+      debugPrint('[ble] rescan (keep connections)');
+
+      await _stopScanInternal();
+
+      // Drop discovered-but-not-connected entries so the list refreshes
+      // cleanly. Keep connected bands and their cached device handles.
+      final Map<String, BandState> nextBands = <String, BandState>{
+        for (final MapEntry<String, BandState> e in state.bands.entries)
+          if (e.value.status == BandStatus.connected) e.key: e.value,
+      };
+      _devices.removeWhere(
+        (String chipId, BluetoothDevice _) => !nextBands.containsKey(chipId),
+      );
+      state = state.copyWith(bands: nextBands, clearError: true);
+
+      await _startScanStream();
+    } finally {
+      _restartInProgress = false;
+    }
+  }
+
+  /// Shared scan-startup path: permissions, adapter check, subscribe,
+  /// and `startScan`. Caller is responsible for any state cleanup
+  /// before invocation.
+  Future<void> _startScanStream() async {
     if (!await _ensurePermissions()) {
-      _markBothError('Permisos BLE denegados');
+      debugPrint('[ble] permissions denied → aborting scan');
+      _setError('Permisos BLE denegados');
       return;
     }
 
-    // Adapter must be ON before calling startScan — otherwise it throws.
     final BluetoothAdapterState adapter =
         await FlutterBluePlus.adapterState.first;
+    debugPrint('[ble] adapter state: $adapter');
     if (adapter != BluetoothAdapterState.on) {
-      _markBothError('Bluetooth apagado');
+      _setError('Bluetooth apagado');
       return;
     }
 
     _scanSub = FlutterBluePlus.scanResults.listen(
       _onScanResults,
       onError: (Object e) {
+        debugPrint('[ble] scan stream error: $e');
         state = state.copyWith(error: 'Error de escaneo: $e');
       },
     );
 
     try {
+      debugPrint('[ble] startScan(withServices=[$_kServiceUuid])');
       await FlutterBluePlus.startScan(
         withServices: <Guid>[Guid(_kServiceUuid)],
         timeout: const Duration(seconds: 30),
-        // Re-emit the same device with refreshed RSSI on every advertisement
-        // — needed so the UI can show a live signal indicator while pairing.
         continuousUpdates: true,
       );
     } on Exception catch (e) {
+      debugPrint('[ble] startScan failed: $e');
       state = state.copyWith(error: 'No pude iniciar el scan: $e');
     }
   }
@@ -231,7 +316,7 @@ class BleManager extends StateNotifier<BleManagerState> {
       try {
         await FlutterBluePlus.stopScan();
       } on Exception catch (_) {
-        // ignore — not fatal.
+        // not fatal
       }
     }
   }
@@ -239,110 +324,208 @@ class BleManager extends StateNotifier<BleManagerState> {
   void _onScanResults(List<ScanResult> results) {
     if (_disposed) return;
 
-    // Sort by RSSI desc so the closest band claims the first free slot.
-    final List<ScanResult> sportBands = results
-        .where(
-          (ScanResult r) => r.device.advName.startsWith(_kAdvNamePrefix),
-        )
-        .toList()
-      ..sort((ScanResult a, ScanResult b) => b.rssi.compareTo(a.rssi));
+    // Track every SportBand advertiser we see and surface it in
+    // `state.bands` with status `found`. New bands stay in `found`
+    // waiting for the user to tap them in `ScanScreen` — but bands
+    // we already trust (a persisted side assignment exists in
+    // `state.assignments`) auto-reconnect immediately, so a returning
+    // user lands on Scan / Home with their pair already linked up.
+    for (final ScanResult r in results) {
+      if (!r.device.advName.startsWith(_kAdvNamePrefix)) continue;
+      final String chipId = _chipIdFromAdvName(r.device.advName);
+      if (chipId.isEmpty) continue;
 
-    for (final ScanResult r in sportBands) {
-      final String remoteId = r.device.remoteId.str;
+      // Cache the BluetoothDevice so `connectBand` can dial it later
+      // without needing a second scan to resolve the chipId.
+      _devices[chipId] = r.device;
 
-      // Already paired to a slot — just refresh RSSI.
-      final String? assigned = _assigned[remoteId];
-      if (assigned != null) {
-        _setBand(assigned, rssi: r.rssi);
-        continue;
+      final BandState? existing = state.bands[chipId];
+      if (existing == null) {
+        final bool isKnown = state.assignments.containsKey(chipId);
+        debugPrint(
+            '[ble] discovered chipId=$chipId rssi=${r.rssi} ${isKnown ? "(known → auto-connect)" : ""}');
+        _setBand(
+          chipId,
+          BandState(
+            chipId: chipId,
+            nodeId: state.assignments[chipId] ?? '',
+            name: r.device.advName,
+            status: BandStatus.found,
+            mac: r.device.remoteId.str,
+            rssi: r.rssi,
+          ),
+        );
+        if (isKnown) {
+          // ignore: unawaited_futures
+          connectBand(chipId);
+        }
+      } else if (existing.status == BandStatus.found) {
+        // Refresh RSSI on subsequent ad packets while the row is still
+        // discoverable in the list. Once the user taps and we move to
+        // `connecting`/`connected`, leave the value alone.
+        _setBand(chipId, existing.copyWith(rssi: r.rssi));
       }
-
-      // Pick the next free slot.
-      final String? slot = !_assigned.values.contains(kLeftAnkle)
-          ? kLeftAnkle
-          : !_assigned.values.contains(kRightAnkle)
-              ? kRightAnkle
-              : null;
-      if (slot == null) continue;
-
-      _assigned[remoteId] = slot;
-      _setBand(
-        slot,
-        status: BandStatus.found,
-        name: r.device.advName,
-        mac: remoteId,
-        rssi: r.rssi,
-      );
-      // Fire-and-forget — connecting in parallel is the whole point.
-      // ignore: unawaited_futures
-      _connect(r.device, slot);
     }
 
-    if (_assigned.values.toSet().length >= 2) {
-      // Both slots claimed; no need to keep scanning.
+    // Stop scanning once two bands are actually connected — keeps the
+    // radio quiet during the rest of the pairing flow. Until then we
+    // keep listening so the discovery list stays fresh.
+    final int connectedCount = state.bands.values
+        .where((BandState b) => b.status == BandStatus.connected)
+        .length;
+    if (connectedCount >= 2) {
       // ignore: unawaited_futures
       _stopScanInternal();
     }
   }
 
-  Future<void> _connect(BluetoothDevice device, String nodeId) async {
+  static String _chipIdFromAdvName(String advName) {
+    if (!advName.startsWith(_kAdvNamePrefix)) return '';
+    return advName.substring(_kAdvNamePrefix.length);
+  }
+
+  /// Public: connect a band the user has tapped in the discovery list.
+  /// `chipId` must be one we've seen in a recent scan result (so
+  /// `_devices[chipId]` is set). Idempotent — re-tapping a band already
+  /// connecting/connected is a no-op.
+  Future<void> connectBand(String chipId) async {
+    if (_disposed) return;
+    final BluetoothDevice? device = _devices[chipId];
+    if (device == null) {
+      debugPrint('[ble] connectBand($chipId) ignored — unknown chipId');
+      return;
+    }
+    if (_conns.containsKey(chipId)) {
+      debugPrint('[ble] connectBand($chipId) ignored — already connecting');
+      return;
+    }
+    debugPrint('[ble] connectBand($chipId)');
+    _setBand(
+      chipId,
+      _maybeBandFor(chipId).copyWith(status: BandStatus.connecting),
+    );
+    await _connect(device, chipId);
+  }
+
+  /// Public: drop the connection for one band — used when the user
+  /// taps a connected row to undo their selection. The row goes back
+  /// to `found` so it re-appears in the "Disponibles" list.
+  Future<void> disconnectBand(String chipId) async {
+    if (_disposed) return;
+    debugPrint('[ble] disconnectBand($chipId)');
+    final _BandConnection? conn = _conns.remove(chipId);
+    if (conn != null) {
+      await conn.disconnect();
+    }
+    final BandState current = _maybeBandFor(chipId);
+    _setBand(
+      chipId,
+      current.copyWith(status: BandStatus.found, clearBattery: true),
+    );
+  }
+
+  Future<void> _connect(BluetoothDevice device, String chipId) async {
     final _BandConnection conn = _BandConnection(
       device: device,
-      nodeId: nodeId,
+      chipId: chipId,
       manager: this,
     );
-    _conns[nodeId] = conn;
+    _conns[chipId] = conn;
     try {
       await conn.connectAndSubscribe();
-    } on Exception {
-      _setBand(nodeId, status: BandStatus.error);
+      debugPrint('[ble] connected chipId=$chipId');
+    } on Exception catch (e) {
+      debugPrint('[ble] connect failed chipId=$chipId: $e');
+      _setBand(chipId, _maybeBandFor(chipId).copyWith(status: BandStatus.error));
+      _conns.remove(chipId);
     }
   }
 
-  void _markBothError(String msg) {
+  /// Public: persist the user's choice from the shake-to-identify flow.
+  /// `side` must be `LEFT_ANKLE` or `RIGHT_ANKLE` (the constants
+  /// re-exported from `band_assignment_storage.dart`). The other band
+  /// — if connected — automatically takes the opposite side.
+  Future<void> assignSide({
+    required String chipId,
+    required String side,
+  }) async {
+    assert(side == kLeftAnkle || side == kRightAnkle);
+    debugPrint('[ble] assignSide chipId=$chipId side=$side');
+
+    await _storage.assign(chipId, side);
+    final Map<String, String> next = await _storage.load();
+
+    // Apply the new mapping to in-memory band states so consumers see
+    // the right `nodeId` immediately.
+    final Map<String, BandState> nextBands =
+        Map<String, BandState>.from(state.bands);
+    for (final MapEntry<String, BandState> e in nextBands.entries.toList()) {
+      nextBands[e.key] =
+          e.value.copyWith(nodeId: next[e.key] ?? '');
+    }
+
+    state = state.copyWith(bands: nextBands, assignments: next);
+  }
+
+  /// Public: clear all persisted assignments (e.g. when the user taps
+  /// "REESCANEAR" — they want to re-pair from scratch).
+  Future<void> clearAssignments() async {
+    await _storage.clear();
+    final Map<String, BandState> nextBands = <String, BandState>{
+      for (final MapEntry<String, BandState> e in state.bands.entries)
+        e.key: e.value.copyWith(nodeId: ''),
+    };
     state = state.copyWith(
-      error: msg,
-      left: state.left.copyWith(status: BandStatus.error),
-      right: state.right.copyWith(status: BandStatus.error),
+      bands: nextBands,
+      assignments: <String, String>{},
     );
   }
 
-  /// Mutate one band's slice of state. Fields default to "keep current".
-  void _setBand(
-    String nodeId, {
+  void _setError(String msg) {
+    final Map<String, BandState> errored = <String, BandState>{
+      for (final MapEntry<String, BandState> e in state.bands.entries)
+        e.key: e.value.copyWith(status: BandStatus.error),
+    };
+    state = state.copyWith(error: msg, bands: errored);
+  }
+
+  BandState _maybeBandFor(String chipId) {
+    return state.bands[chipId] ??
+        BandState(
+          chipId: chipId,
+          nodeId: state.assignments[chipId] ?? '',
+          name: '$_kAdvNamePrefix$chipId',
+          status: BandStatus.searching,
+        );
+  }
+
+  void _setBand(String chipId, BandState next) {
+    if (_disposed) return;
+    final Map<String, BandState> nextBands =
+        Map<String, BandState>.from(state.bands);
+    nextBands[chipId] = next.copyWith(
+      nodeId: state.assignments[chipId] ?? next.nodeId,
+    );
+    state = state.copyWith(bands: nextBands);
+  }
+
+  void _patchBand(
+    String chipId, {
     BandStatus? status,
-    String? name,
-    String? mac,
     int? rssi,
     int? battery,
     bool clearBattery = false,
   }) {
-    if (_disposed) return;
-    if (nodeId == kLeftAnkle) {
-      final BandState l = state.left;
-      state = state.copyWith(
-        left: BandState(
-          nodeId: kLeftAnkle,
-          name: name ?? l.name,
-          mac: mac ?? l.mac,
-          status: status ?? l.status,
-          rssi: rssi ?? l.rssi,
-          battery: clearBattery ? null : (battery ?? l.battery),
-        ),
-      );
-    } else if (nodeId == kRightAnkle) {
-      final BandState r = state.right;
-      state = state.copyWith(
-        right: BandState(
-          nodeId: kRightAnkle,
-          name: name ?? r.name,
-          mac: mac ?? r.mac,
-          status: status ?? r.status,
-          rssi: rssi ?? r.rssi,
-          battery: clearBattery ? null : (battery ?? r.battery),
-        ),
-      );
-    }
+    final BandState current = _maybeBandFor(chipId);
+    _setBand(
+      chipId,
+      current.copyWith(
+        status: status,
+        rssi: rssi,
+        battery: battery,
+        clearBattery: clearBattery,
+      ),
+    );
   }
 
   void _emit(SensorData data) {
@@ -350,7 +533,6 @@ class BleManager extends StateNotifier<BleManagerState> {
     _sensorCtrl.add(data);
   }
 
-  /// Async teardown — call from `ref.onDispose` so we can await disconnects.
   Future<void> disposeAsync() async {
     _disposed = true;
     await _stopScanInternal();
@@ -361,7 +543,6 @@ class BleManager extends StateNotifier<BleManagerState> {
     ];
     await Future.wait<void>(teardown);
     _conns.clear();
-    _assigned.clear();
     await _sensorCtrl.close();
   }
 
@@ -369,7 +550,6 @@ class BleManager extends StateNotifier<BleManagerState> {
   void dispose() {
     if (!_disposed) {
       _disposed = true;
-      // Best-effort sync teardown — ignore any awaits we cannot run here.
       _scanSub?.cancel();
       _adapterSub?.cancel();
       _isScanningSub?.cancel();
@@ -383,17 +563,17 @@ class BleManager extends StateNotifier<BleManagerState> {
   }
 }
 
-/// Per-band connection holder. Keeps the device, the connectionState
-/// subscription, and the per-characteristic notification subscriptions.
+/// Per-band connection holder. Keyed by chipId now (not nodeId), so it
+/// works for bands that haven't been assigned a side yet.
 class _BandConnection {
   _BandConnection({
     required this.device,
-    required this.nodeId,
+    required this.chipId,
     required this.manager,
   });
 
   final BluetoothDevice device;
-  final String nodeId;
+  final String chipId;
   final BleManager manager;
 
   StreamSubscription<BluetoothConnectionState>? _stateSub;
@@ -401,6 +581,13 @@ class _BandConnection {
   StreamSubscription<List<int>>? _batterySub;
 
   bool _disposing = false;
+
+  /// True once `device.connect()` has succeeded at least once for this
+  /// `_BandConnection`. Used to ignore the very first
+  /// `BluetoothConnectionState.disconnected` emission — that one is just
+  /// `connectionState.listen` reporting the *current* state right after
+  /// subscribe, not a real disconnect event.
+  bool _everConnected = false;
 
   Future<void> connectAndSubscribe() async {
     _stateSub ??= device.connectionState.listen(_onConnectionState);
@@ -410,19 +597,17 @@ class _BandConnection {
       autoConnect: false,
     );
 
-    // Larger MTU allows the firmware to fit a 22-byte sensor packet plus
-    // ATT overhead inside a single notify (no fragmentation). iOS handles
-    // MTU automatically — calling there is unnecessary.
     if (Platform.isAndroid) {
       try {
         await device.requestMtu(247);
       } on Exception {
-        // Some Android stacks reject — fall back to default MTU.
+        // some Android stacks reject — fall back to default MTU.
       }
     }
 
     await _discoverAndSubscribe();
-    manager._setBand(nodeId, status: BandStatus.connected);
+    _everConnected = true;
+    manager._patchBand(chipId, status: BandStatus.connected);
   }
 
   Future<void> _discoverAndSubscribe() async {
@@ -441,16 +626,16 @@ class _BandConnection {
           await c.setNotifyValue(true);
           _sensorSub = c.lastValueStream.listen((List<int> bytes) {
             if (bytes.length < 14) return;
-            final SensorData? data = SensorParser.parse(bytes, nodeId);
+            final String side = manager.assignments[chipId] ?? '';
+            final SensorData? data =
+                SensorParser.parse(bytes, chipId, side);
             if (data != null) manager._emit(data);
           });
         } else if (c.uuid == Guid(_kBatteryUuid)) {
-          // Read once so the UI shows a number immediately, then subscribe
-          // to notifications (the firmware emits one every 10 s).
           try {
             final List<int> v = await c.read();
             if (v.isNotEmpty) {
-              manager._setBand(nodeId, battery: v[0]);
+              manager._patchBand(chipId, battery: v[0]);
             }
           } on Exception {
             // ignore — keep going.
@@ -459,7 +644,7 @@ class _BandConnection {
             await c.setNotifyValue(true);
             _batterySub = c.lastValueStream.listen((List<int> bytes) {
               if (bytes.isNotEmpty) {
-                manager._setBand(nodeId, battery: bytes[0]);
+                manager._patchBand(chipId, battery: bytes[0]);
               }
             });
           }
@@ -470,28 +655,39 @@ class _BandConnection {
 
   void _onConnectionState(BluetoothConnectionState s) {
     if (_disposing) return;
+
+    if (s == BluetoothConnectionState.connected) {
+      _everConnected = true;
+      return;
+    }
+
     if (s != BluetoothConnectionState.disconnected) return;
 
-    manager._setBand(
-      nodeId,
+    // Ignore the synthetic "disconnected" the stream emits on subscribe
+    // — that's just the current state being replayed before our own
+    // `device.connect()` has had a chance to run. Only react to real
+    // drops that happen after we've been connected at least once.
+    if (!_everConnected) return;
+
+    debugPrint('[ble] disconnect detected chipId=$chipId — scheduling reconnect');
+    manager._patchBand(
+      chipId,
       status: BandStatus.error,
       clearBattery: true,
     );
 
-    // Simple 2 s backoff reconnect. The connectionState listener stays
-    // subscribed across reconnects, so we just call connect() again.
     Future<void>.delayed(const Duration(seconds: 2), () async {
       if (_disposing) return;
       try {
-        manager._setBand(nodeId, status: BandStatus.searching);
+        manager._patchBand(chipId, status: BandStatus.connecting);
         await device.connect(
           timeout: const Duration(seconds: 10),
           autoConnect: false,
         );
         await _discoverAndSubscribe();
-        manager._setBand(nodeId, status: BandStatus.connected);
+        manager._patchBand(chipId, status: BandStatus.connected);
       } on Exception {
-        manager._setBand(nodeId, status: BandStatus.error);
+        manager._patchBand(chipId, status: BandStatus.error);
       }
     });
   }
@@ -504,27 +700,34 @@ class _BandConnection {
     try {
       await device.disconnect();
     } on Exception {
-      // Already disconnected — fine.
+      // already disconnected — fine.
     }
   }
 }
 
 /// Singleton-per-app BleManager. Non-autoDispose so connections persist
-/// across screen transitions (scan → home → dashboard).
+/// across screen transitions (scan → identify → home → dashboard).
 final StateNotifierProvider<BleManager, BleManagerState> bleManagerProvider =
     StateNotifierProvider<BleManager, BleManagerState>((Ref ref) {
-  final BleManager m = BleManager();
+  final BandAssignmentStorage storage =
+      ref.watch(bandAssignmentStorageProvider);
+  final BleManager m = BleManager(storage);
   ref.onDispose(() {
-    // Fire-and-forget async teardown; Riverpod doesn't await onDispose.
     // ignore: unawaited_futures
     m.disposeAsync();
   });
   return m;
 });
 
-/// Decoded sensor data stream — subscribers get every parsed packet from
-/// either band. Used by the metrics engine in Sprint 3.
+/// Decoded sensor data stream — used by the shake detector during
+/// pairing and (in Sprint 3) by the metrics engine.
 final Provider<Stream<SensorData>> sensorDataStreamProvider =
     Provider<Stream<SensorData>>((Ref ref) {
   return ref.watch(bleManagerProvider.notifier).sensorDataStream;
+});
+
+/// True iff there are bands connected without a side assignment yet —
+/// drives the navigation from Scan to IdentifyScreen.
+final Provider<bool> needsIdentificationProvider = Provider<bool>((Ref ref) {
+  return ref.watch(bleManagerProvider).pendingChipIds.isNotEmpty;
 });

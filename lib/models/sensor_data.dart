@@ -12,6 +12,7 @@ import 'dart:math' as math;
 /// shorter than v3 (legacy v1/v2 firmware).
 class SensorData {
   const SensorData({
+    required this.chipId,
     required this.nodeId,
     required this.timestampMs,
     required this.qw,
@@ -29,7 +30,15 @@ class SensorData {
     required this.yaw,
   });
 
-  /// `LEFT_ANKLE` or `RIGHT_ANKLE` — assigned by the app at pairing time.
+  /// 4-hex factory id from the BLE local name `SportBand-XXXX`. Stable
+  /// across resets and OS-level MAC rotation, so it's the only reliable
+  /// way to identify a physical band over time. Used by the shake
+  /// detector and the persistent `chipId → side` storage.
+  final String chipId;
+
+  /// `LEFT_ANKLE` / `RIGHT_ANKLE` once the user has identified the band
+  /// in the pairing flow. Empty string while a band is connected but not
+  /// yet assigned a side.
   final String nodeId;
 
   /// Source timestamp from the firmware, relative to session start (uint16,
@@ -59,6 +68,7 @@ class SensorData {
 
   /// Build from a quaternion + IMU sample, computing Euler angles on the way.
   factory SensorData.fromQuaternion({
+    required String chipId,
     required String nodeId,
     required int timestampMs,
     required double qw,
@@ -88,6 +98,7 @@ class SensorData {
         ) *
         rad2deg;
     return SensorData(
+      chipId: chipId,
       nodeId: nodeId,
       timestampMs: timestampMs,
       qw: qw,

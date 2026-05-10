@@ -1,17 +1,24 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/band_state.dart';
+import '../services/band_assignment_storage.dart';
 import '../services/ble_manager.dart';
 
-/// Per-side `BandState` derived from the shared `bleManagerProvider`. These
-/// are non-autoDispose: BLE connections must survive screen transitions
-/// (scan → home → dashboard), so any consumer can keep watching them.
+/// Per-side `BandState` derived from the shared `bleManagerProvider`.
+/// Returns `BandState.empty` (a placeholder in `searching` status) when
+/// no band has been assigned to the slot yet — keeps every consumer
+/// non-nullable while letting the UI render a "looking for band" card.
+///
+/// Non-autoDispose: BLE connections must survive screen transitions
+/// (scan → identify → home → dashboard).
 final Provider<BandState> leftBandProvider = Provider<BandState>(
-  (Ref ref) => ref.watch(bleManagerProvider).left,
+  (Ref ref) =>
+      ref.watch(bleManagerProvider).bandForSide(kLeftAnkle) ?? BandState.empty,
 );
 
 final Provider<BandState> rightBandProvider = Provider<BandState>(
-  (Ref ref) => ref.watch(bleManagerProvider).right,
+  (Ref ref) =>
+      ref.watch(bleManagerProvider).bandForSide(kRightAnkle) ?? BandState.empty,
 );
 
 /// True iff both bands are in `BandStatus.connected`. Drives the scan-screen

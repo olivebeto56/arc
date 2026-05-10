@@ -209,6 +209,42 @@ class ArcIcons {
     );
   }
 
+  /// Check / tick glyph (24×24, stroke 2). Used in the Scan screen
+  /// "Conectada" rows.
+  static Widget check({
+    double size = 18,
+    Color color = AppColors.ok,
+  }) {
+    return _build(
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" '
+      'stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" '
+      'stroke-linejoin="round">'
+      '<polyline points="20 6 9 17 4 12"/>'
+      '</svg>',
+      size: size,
+      color: color,
+    );
+  }
+
+  /// Refresh / circular-arrow glyph (24×24, stroke 1.5). Used to flag
+  /// rows that failed to connect and can be re-tapped.
+  static Widget refresh({
+    double size = 18,
+    Color color = AppColors.crit,
+  }) {
+    return _build(
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" '
+      'stroke="#FFFFFF" stroke-width="1.5" stroke-linecap="round" '
+      'stroke-linejoin="round">'
+      '<polyline points="23 4 23 10 17 10"/>'
+      '<polyline points="1 20 1 14 7 14"/>'
+      '<path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>'
+      '</svg>',
+      size: size,
+      color: color,
+    );
+  }
+
   /// Battery glyph with a percentage-driven inner fill (viewBox 28×12).
   ///
   /// JSX literal — three rects with different opacities means we cannot use

@@ -163,9 +163,7 @@ class _PermisosScreenState extends ConsumerState<PermisosScreen>
 
   void _goToScan(BuildContext context) {
     Navigator.of(context).pushReplacement(
-      MaterialPageRoute<void>(
-        builder: (_) => const ScanScreen(),
-      ),
+      MaterialPageRoute<void>(builder: (_) => const ScanScreen()),
     );
   }
 }

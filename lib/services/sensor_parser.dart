@@ -37,8 +37,15 @@ class SensorParser {
   /// Returns null when the payload is too short to even contain a v1 packet.
   /// Otherwise returns a fully populated `SensorData` (gyro fields are NaN
   /// for v1/v2 packets).
+  ///
+  /// `chipId` is the stable 4-hex factory identifier (lower 16 bits of the
+  /// nRF52840 DEVICEID, encoded by the firmware in the BLE local name
+  /// `SportBand-XXXX`). `nodeId` is the side label (`LEFT_ANKLE` /
+  /// `RIGHT_ANKLE`) — empty string when the band is connected but not yet
+  /// assigned a side via the pairing flow.
   static SensorData? parse(
     List<int> bytes,
+    String chipId,
     String nodeId, {
     double gyroScale = _defaultGyroScale,
   }) {
@@ -67,6 +74,7 @@ class SensorParser {
         : double.nan;
 
     return SensorData.fromQuaternion(
+      chipId: chipId,
       nodeId: nodeId,
       timestampMs: ts,
       qw: qw,

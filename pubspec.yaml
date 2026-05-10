@@ -21,6 +21,11 @@ dependencies:
   # iOS divergence between the two plugins. See:
   # https://github.com/Baseflow/flutter-permission-handler/issues/1391
   geolocator: ^13.0.2
+  # Local storage for `chipId → side` band assignments. After the user
+  # identifies their left/right band once via shake, we persist the map
+  # here so subsequent launches reconnect silently. Versioned key so we
+  # can migrate the shape post-MVP.
+  shared_preferences: ^2.3.0
   flutter_svg: ^2.0.10
   intl: ^0.20.2
 

@@ -4,30 +4,35 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../providers/permissions_provider.dart';
+import '../services/band_assignment_storage.dart';
+import '../services/ble_manager.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_text.dart';
 import '../widgets/arc_logo.dart';
 import '../widgets/loading_bar.dart';
+import 'home_screen.dart';
 import 'permisos_screen.dart';
 import 'scan_screen.dart';
 
 /// Splash screen shown for ~1500 ms while BLE / GPS subsystems initialize.
 ///
-/// Layout per JSX:
-///  - Centered cluster: ARCLogo(height: 56) + tagline (caption style), gap 32
-///  - Absolute bottom 100 px: LoadingBar (32 x 1, cyan dot moving L→R)
-///  - Absolute bottom 50 px:  mono version readout
-class SplashScreen extends StatefulWidget {
+/// Routing logic after the splash duration:
+///  - Permisos missing                    → PermisosScreen
+///  - Permisos OK + 2 bands persisted     → HomeScreen (BleManager
+///                                           reconnects in background)
+///  - Permisos OK + first-time pairing    → ScanScreen
+class SplashScreen extends ConsumerStatefulWidget {
   const SplashScreen({super.key});
 
   @override
-  State<SplashScreen> createState() => _SplashScreenState();
+  ConsumerState<SplashScreen> createState() => _SplashScreenState();
 }
 
-class _SplashScreenState extends State<SplashScreen> {
+class _SplashScreenState extends ConsumerState<SplashScreen> {
   static const Duration _splashDuration = Duration(milliseconds: 1500);
 
   Timer? _navigationTimer;
@@ -46,15 +51,34 @@ class _SplashScreenState extends State<SplashScreen> {
 
   Future<void> _goNext() async {
     if (!mounted) return;
-    // Skip the Permisos step when the OS already remembers a grant from
-    // a previous session. New users still see it.
-    final bool alreadyGranted = await arePermissionsAlreadyGranted();
+    final bool permsGranted = await arePermissionsAlreadyGranted();
     if (!mounted) return;
+
+    if (!permsGranted) {
+      _push(const PermisosScreen());
+      return;
+    }
+
+    final BandAssignmentStorage storage =
+        ref.read(bandAssignmentStorageProvider);
+    final Map<String, String> assignments = await storage.load();
+    if (!mounted) return;
+
+    if (assignments.length >= 2) {
+      // Pre-warm BleManager so it starts scanning + reconnecting before
+      // the user even reaches the Home screen. The BandsCard reflects
+      // the connection state in real time once the manager catches up.
+      ref.read(bleManagerProvider);
+      _push(const HomeScreen());
+      return;
+    }
+
+    _push(const ScanScreen());
+  }
+
+  void _push(Widget destination) {
     Navigator.of(context).pushReplacement(
-      MaterialPageRoute<void>(
-        builder: (_) =>
-            alreadyGranted ? const ScanScreen() : const PermisosScreen(),
-      ),
+      MaterialPageRoute<void>(builder: (_) => destination),
     );
   }
 
@@ -104,4 +128,3 @@ class _SplashScreenState extends State<SplashScreen> {
     );
   }
 }
-
